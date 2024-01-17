@@ -196,8 +196,13 @@ contents:
       # create bridge
       if ! nmcli connection show "$bridge_name" &> /dev/null; then
         ovs-vsctl --timeout=30 --if-exists del-br "$bridge_name"
-        add_nm_conn type ovs-bridge con-name "$bridge_name" conn.interface "$bridge_name" 802-3-ethernet.mtu ${iface_mtu} \
-        connection.autoconnect-slaves 1
+        if grep -w -q ovs-dpdk-poc /proc/cmdline; then
+          add_nm_conn type ovs-bridge con-name "$bridge_name" conn.interface "$bridge_name" 802-3-ethernet.mtu \
+          ${iface_mtu} connection.autoconnect-slaves 1 ovs-bridge.datapath-type netdev
+        else
+          add_nm_conn type ovs-bridge con-name "$bridge_name" conn.interface "$bridge_name" 802-3-ethernet.mtu \
+          ${iface_mtu} connection.autoconnect-slaves 1
+        fi
       fi
 
       # find default port to add to bridge
@@ -280,6 +285,13 @@ contents:
         # mac address would otherwise depend on enslave order for which we have
         # no control going forward.
         extra_phys_args+=( 802-3-ethernet.cloned-mac-address "${iface_mac}" )
+      fi
+
+      if grep -w -q ovs-dpdk-poc /proc/cmdline; then
+        extra_phys_args+=(ethtool.feature-gro off)
+        extra_phys_args+=(ethtool.feature-gso off)
+        extra_phys_args+=(ethtool.feature-tso off)
+        extra_phys_args+=(ethtool.feature-tx off)
       fi
 
       # use ${extra_phys_args[@]+"${extra_phys_args[@]}"} instead of ${extra_phys_args[@]} to be compatible with bash 4.2 in RHEL7.9
@@ -934,6 +946,27 @@ contents:
           # from previous attempts.
           if [ -f "$extra_bridge_file" ] || [ -z "$(nmcli connection show --active br-ex 2> /dev/null)" ]; then
             echo "Bridge br-ex is not active, restoring previous configuration before proceeding..."
+            rollback_nm
+            print_state
+          fi
+        fi
+
+        # enable DPDK
+        if grep -w -q ovs-dpdk-poc /proc/cmdline; then
+          ovs-vsctl set Open_vSwitch . other_config:dpdk-init=true
+          ovs-vsctl set open . external-ids:ovn-bridge-datapath-type="netdev"
+        else
+          ovs-vsctl set Open_vSwitch . other_config:dpdk-init=false
+          ovs-vsctl --if-exists remove open . external-ids ovn-bridge-datapath-type="netdev"
+        fi
+
+        # delete bridge if datapath change requested
+        if nmcli connection show br-ex &>/dev/null; then
+          ovs_datapath_type=$(nmcli --get-values ovs-bridge.datapath-type connection show br-ex)
+          if { grep -w -q ovs-dpdk-poc /proc/cmdline && [ "$ovs_datapath_type" != "netdev" ]; } ||
+             { ! grep -w -q ovs-dpdk-poc /proc/cmdline && [ "$ovs_datapath_type" = "netdev" ]; }
+          then
+            echo "Datapath change requested, deleting previous configuration before proceeding..."
             rollback_nm
             print_state
           fi
