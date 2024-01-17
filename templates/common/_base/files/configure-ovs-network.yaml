@@ -88,6 +88,19 @@ contents:
 
         # reload keyfiles
         nmcli connection reload
+
+        if [ -e "$NM_CONN_ETC_PATH/ovs-if-br-ex.nmconnection" ]; then
+          echo "Found odd configuration (marker 9)"
+          nmcli c s
+        fi
+
+        sleep 3
+
+        if [ -e "$NM_CONN_ETC_PATH/ovs-if-br-ex.nmconnection" ]; then
+          echo "Found odd configuration (marker 10)"
+          nmcli c s
+        fi
+
       fi
     }
 
@@ -212,8 +225,19 @@ contents:
       # create bridge
       if ! nmcli connection show "$bridge_name" &> /dev/null; then
         ovs-vsctl --timeout=30 --if-exists del-br "$bridge_name"
-        add_nm_conn "$bridge_name" type ovs-bridge conn.interface "$bridge_name" 802-3-ethernet.mtu ${iface_mtu} \
-        connection.autoconnect-slaves 1
+        if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline; then
+          add_nm_conn "$bridge_name" type ovs-bridge conn.interface "$bridge_name" 802-3-ethernet.mtu ${iface_mtu} \
+          connection.autoconnect-slaves 1 ovs-bridge.datapath-type netdev
+
+          # TODO: Why does NetworkManager write to /etc instead of /run?
+          if [ -e "$NM_CONN_ETC_PATH/ovs-if-${bridge_name}.nmconnection" ]; then
+            mv -n "$NM_CONN_ETC_PATH/ovs-if-${bridge_name}.nmconnection" "$NM_CONN_RUN_PATH/"
+            nmcli connection reload
+          fi
+        else
+          add_nm_conn "$bridge_name" type ovs-bridge conn.interface "$bridge_name" 802-3-ethernet.mtu ${iface_mtu} \
+          connection.autoconnect-slaves 1
+        fi
       fi
 
       # find default port to add to bridge
@@ -296,6 +320,13 @@ contents:
         # mac address would otherwise depend on enslave order for which we have
         # no control going forward.
         extra_phys_args+=( 802-3-ethernet.cloned-mac-address "${iface_mac}" )
+      fi
+
+      if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline; then
+        extra_phys_args+=(ethtool.feature-gro off)
+        extra_phys_args+=(ethtool.feature-gso off)
+        extra_phys_args+=(ethtool.feature-tso off)
+        extra_phys_args+=(ethtool.feature-tx off)
       fi
 
       # use ${extra_phys_args[@]+"${extra_phys_args[@]}"} instead of ${extra_phys_args[@]} to be compatible with bash 4.2 in RHEL7.9
@@ -496,6 +527,19 @@ contents:
     add_nm_conn() {
       # Use `save no` to add a temporary profile
       nmcli c add save no con-name "$@" connection.autoconnect no
+
+      if [ -e "$NM_CONN_ETC_PATH/ovs-if-br-ex.nmconnection" ]; then
+        echo "Found odd configuration (marker 1)"
+        nmcli c s
+      fi
+
+      sleep 3
+
+      if [ -e "$NM_CONN_ETC_PATH/ovs-if-br-ex.nmconnection" ]; then
+        echo "Found odd configuration (marker 2)"
+        nmcli c s
+      fi
+
     }
 
     # Modify a temporary connection profile 
@@ -512,9 +556,34 @@ contents:
       cat "$dst_path" > "$src_path"
       rm -f "$dst_path"
       nmcli --offline c mod "$@" < "$src_path" > "$dst_path"
+
+      if [ -e "$NM_CONN_ETC_PATH/ovs-if-br-ex.nmconnection" ]; then
+        echo "Found odd configuration (marker 3)"
+        nmcli c s
+      fi
+
+      sleep 3
+
+      if [ -e "$NM_CONN_ETC_PATH/ovs-if-br-ex.nmconnection" ]; then
+        echo "Found odd configuration (marker 4)"
+        nmcli c s
+      fi
+
       rm -f "$src_path"
       chmod 600 "$dst_path"
       nmcli c load "$dst_path"
+
+      if [ -e "$NM_CONN_ETC_PATH/ovs-if-br-ex.nmconnection" ]; then
+        echo "Found odd configuration (marker 5)"
+        nmcli c s
+      fi
+
+      sleep 3
+
+      if [ -e "$NM_CONN_ETC_PATH/ovs-if-br-ex.nmconnection" ]; then
+        echo "Found odd configuration (marker 6)"
+        nmcli c s
+      fi
     }
 
     # Clone to a temporary connection profile 
@@ -522,6 +591,19 @@ contents:
     clone_nm_conn() {
       # clone as temporary so that it is generated in NM_CONN_RUN_PATH
       nmcli connection clone --temporary "$1" "$2" &> /dev/null
+
+      if [ -e "$NM_CONN_ETC_PATH/ovs-if-br-ex.nmconnection" ]; then
+        echo "Found odd configuration (marker 7)"
+        nmcli c s
+      fi
+
+      sleep 3
+
+      if [ -e "$NM_CONN_ETC_PATH/ovs-if-br-ex.nmconnection" ]; then
+        echo "Found odd configuration (marker 8)"
+        nmcli c s
+      fi
+
     }
 
     # Activates an ordered set of NM connection profiles
@@ -540,6 +622,16 @@ contents:
       # problem and hopefully we can make sure everything is activated as we
       # want next.
       for conn in "${connections[@]}"; do
+        case "$conn" in
+          ovs-if-*)
+            # TODO: Why will modifying ovs-if-* connections fail?
+            echo MARKER1
+            continue
+            ;;
+          *)
+            ;;
+        esac
+
         local slave_type=$(nmcli -g connection.slave-type connection show "$conn")
         if [ "$slave_type" = "team" ] || [ "$slave_type" = "bond" ]; then
           mod_nm_conn "$conn" connection.autoconnect yes
@@ -576,6 +668,17 @@ contents:
           if $is_slave; then
             master_interfaces[$master_interface]=true
           fi
+
+          case "$conn" in
+            ovs-if-*)
+              # TODO: Why will modifying ovs-if-* connections fail?
+              echo MARKER2
+              continue
+              ;;
+            *)
+              ;;
+          esac
+
           mod_nm_conn "$conn" connection.autoconnect yes
           continue
         fi
@@ -595,6 +698,16 @@ contents:
           echo "ERROR: Cannot bring up connection $conn after $i attempts"
           return $s
         fi
+
+        case "$conn" in
+          ovs-if-*)
+            # TODO: Why will modifying ovs-if-* connections fail?
+            echo MARKER3
+            continue
+            ;;
+          *)
+            ;;
+        esac
         mod_nm_conn "$conn" connection.autoconnect yes
       done
       # Check that all master interfaces report at least a single active slave
@@ -976,6 +1089,36 @@ contents:
           if [ -f "$extra_bridge_file" ] || [ -z "$(nmcli connection show --active br-ex 2> /dev/null)" ]; then
             echo "Bridge br-ex is not active, restoring previous configuration before proceeding..."
             rollback_nm
+            print_state
+          fi
+        fi
+
+        # enable DPDK
+        if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline; then
+          modprobe vduse
+          modprobe virtio-vdpa
+
+          ovs-vsctl set Open_vSwitch . other_config:dpdk-init=true
+          ovs-vsctl set Open_vSwitch . other_config:userspace-tso-enable=true
+          ovs-vsctl set open . external-ids:ovn-bridge-datapath-type="netdev"
+        else
+          ovs-vsctl set Open_vSwitch . other_config:dpdk-init=false
+          ovs-vsctl set Open_vSwitch . other_config:userspace-tso-enable=false
+          ovs-vsctl --if-exists remove open . external-ids ovn-bridge-datapath-type="netdev"
+        fi
+
+        # Delete bridges when their datapath type is supposed to change
+        if nmcli connection show br-ex &>/dev/null; then
+          ovs_datapath_type=$(nmcli --get-values ovs-bridge.datapath-type connection show br-ex)
+          if { grep -w -q ovs-dpdk-vduse-poc /proc/cmdline && [ "$ovs_datapath_type" != "netdev" ]; } ||
+             { ! grep -w -q ovs-dpdk-vduse-poc /proc/cmdline && [ "$ovs_datapath_type" = "netdev" ]; }
+          then
+            echo "Datapath change requested, deleting previous configuration before proceeding..."
+            rollback_nm
+
+            # TODO: Change OVN or OVN-Kubernetes to update the datapath type of the OVN integration bridge automatically
+            ovs-vsctl --timeout=30 --if-exists del-br br-int
+
             print_state
           fi
         fi
