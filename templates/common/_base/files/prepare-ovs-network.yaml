@@ -47,15 +47,7 @@ contents:
       print_state
 
       if [ "$1" = "OVNKubernetes" ]; then
-        remove_bridges="no"
-        dpdk_init=$(ovs-vsctl --no-wait get Open_vSwitch . other_config:dpdk-init)
         if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline; then
-          case "$dpdk_init" in
-            *false*)
-              remove_bridges="yes"
-              ;;
-          esac
-
           modprobe vduse
           modprobe virtio-vdpa
 
@@ -64,21 +56,11 @@ contents:
           ovs-vsctl --no-wait set Open_vSwitch . other_config:userspace-tso-enable=true
           ovs-vsctl --no-wait set open . external-ids:ovn-bridge-datapath-type="netdev"
         else
-          case "$dpdk_init" in
-            *true*)
-              remove_bridges="yes"
-              ;;
-          esac
 
           # Disable DPDK
           ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-init=false
           ovs-vsctl --no-wait set Open_vSwitch . other_config:userspace-tso-enable=false
           ovs-vsctl --no-wait --if-exists remove open . external-ids ovn-bridge-datapath-type="netdev"
-        fi
-
-        if [ "$remove_bridges" = "yes" ]; then
-          # Remove bridges created by OVN-Kubernetes
-          ovs-vsctl --no-wait --if-exists del-br br-int -- --if-exists del-br br-local
         fi
       fi
     }
