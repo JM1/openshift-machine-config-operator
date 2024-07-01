@@ -1,0 +1,97 @@
+mode: 0755
+path: "/usr/local/bin/prepare-ovs.sh"
+contents:
+  inline: |
+    #!/bin/bash
+    set -x
+
+    # Used to print network state
+    print_state() {
+      echo "Current device, connection, interface and routing state:"
+      ip -d address show
+      ip route show
+      ip -6 route show
+      ovs-vsctl show
+    }
+
+    # Setup an exit trap to rollback on error
+    handle_exit() {
+      e=$?
+      print_state
+      exit $e
+    }
+
+    # Setup a signal trap to rollback
+    handle_termination() {
+      echo "WARNING: prepare-ovs has been requested to terminate, quitting..."
+
+      # by exiting with an error we will cleanup after ourselves in a
+      # subsequent call to handle_exit
+      exit 1
+    }
+
+    # main function
+    prepare_ovs() {
+      set -eu
+
+      # setup traps to handle signals and other abnormal exits
+      trap 'handle_termination' TERM INT
+      trap 'handle_exit' EXIT
+
+      if ! rpm -qa | grep -q openvswitch; then
+        echo "WARNING: Openvswitch package is not installed!"
+        exit 1
+      fi
+
+      # print initial state
+      print_state
+
+      if [ "$1" = "OVNKubernetes" ]; then
+        if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline; then
+          modprobe vduse
+          modprobe virtio-vdpa
+
+          # Enable DPDK
+          ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-init=true
+          ovs-vsctl --no-wait set Open_vSwitch . other_config:userspace-tso-enable=true
+          ovs-vsctl --no-wait set open . external-ids:ovn-bridge-datapath-type="netdev"
+        else
+
+          # Disable DPDK
+          ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-init=false
+          ovs-vsctl --no-wait set Open_vSwitch . other_config:userspace-tso-enable=false
+          ovs-vsctl --no-wait --if-exists remove open . external-ids ovn-bridge-datapath-type="netdev"
+        fi
+      fi
+    }
+
+    # Retry prepare_ovs until it succeeds.
+    # By default, retry every 15 minutes to give enough time to gather
+    # troubleshooting information in between. Note that prepare_ovs has other
+    # internal retry mechanisms. This retry is intended to give some
+    # self-healing capabilities to temporary but not necessarily short-lived
+    # infrastructure problems.
+    RETRY="${RETRY-15m}"
+    while true; do
+
+      # Disable retries if termination signal is received. Note that systemd
+      # sends the signals to all processes in the group by default so we expect
+      # prepare_ovs to get its own signals.
+      trap 'echo "WARNING: termination requested, disabling retries"; RETRY=""' INT TERM
+
+      # Run prepare_ovs in a sub-shell.
+      ( prepare_ovs "$@" )
+      e=$?
+
+      # Handle signals while we sleep
+      trap 'handle_termination' INT TERM
+
+      # Exit if succesful and not configured to retry
+      [ "$e" -eq 0 ] || [ -z "$RETRY" ] && exit "$e"
+
+      echo "prepare-ovs failed, will retry after $RETRY"
+      # flag that a retry has happened
+      touch /tmp/prepare-ovs-retry
+      sleep "$RETRY"
+
+    done
