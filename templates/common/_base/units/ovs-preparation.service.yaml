@@ -1,0 +1,22 @@
+name: ovs-preparation.service
+enabled: {{if eq .NetworkType "OVNKubernetes" "OpenShiftSDN"}}true{{else}}false{{end}}
+contents: |
+  [Unit]
+  # Kdump will generate it's initramfs based on the running state when kdump.service run
+  # If OVS has already run, the kdump fails to gather a working network config,
+  # which prevent network log exports, sush as SSH.
+  # See https://issues.redhat.com/browse/OCPBUGS-28239
+  After=kdump.service ovsdb-server.service
+  Description=Prepares OVS before it gets configured with proper host networking configuration
+  Requires=ovsdb-server.service
+  Before=ovs-vswitchd.service
+
+  [Service]
+  # Need oneshot to delay kubelet
+  Type=oneshot
+  ExecStart=/usr/local/bin/prepare-ovs.sh {{.NetworkType}}
+  StandardOutput=journal+console
+  StandardError=journal+console
+
+  [Install]
+  RequiredBy=kubelet-dependencies.target

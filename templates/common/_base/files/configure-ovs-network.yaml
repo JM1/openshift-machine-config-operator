@@ -1093,20 +1093,6 @@ contents:
           fi
         fi
 
-        # enable DPDK
-        if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline; then
-          modprobe vduse
-          modprobe virtio-vdpa
-
-          ovs-vsctl set Open_vSwitch . other_config:dpdk-init=true
-          ovs-vsctl set Open_vSwitch . other_config:userspace-tso-enable=true
-          ovs-vsctl set open . external-ids:ovn-bridge-datapath-type="netdev"
-        else
-          ovs-vsctl set Open_vSwitch . other_config:dpdk-init=false
-          ovs-vsctl set Open_vSwitch . other_config:userspace-tso-enable=false
-          ovs-vsctl --if-exists remove open . external-ids ovn-bridge-datapath-type="netdev"
-        fi
-
         # Delete bridges when their datapath type is supposed to change
         if nmcli connection show br-ex &>/dev/null; then
           ovs_datapath_type=$(nmcli --get-values ovs-bridge.datapath-type connection show br-ex)
