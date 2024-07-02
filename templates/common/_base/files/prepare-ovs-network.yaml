@@ -58,6 +58,20 @@ contents:
           ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-init=true
           ovs-vsctl --no-wait set Open_vSwitch . other_config:userspace-tso-enable=true
           ovs-vsctl --no-wait set open . external-ids:ovn-bridge-datapath-type="netdev"
+
+          # Save power with OVS-DPDK PMD thread load-based sleeping
+          # Ref.: https://developers.redhat.com/articles/2023/10/16/save-power-ovs-dpdk-pmd-thread-load-based-sleeping
+          ovs-vsctl --no-wait set Open_vSwitch . other_config:pmd-sleep-max=0
+          (
+            set -- $(cat /proc/cmdline)
+            for arg in "$@"; do
+              case "$arg" in
+                ovs-pmd-sleep-max=*)
+                  ovs-vsctl --no-wait set Open_vSwitch . "other_config:pmd-sleep-max=${arg#ovs-pmd-sleep-max=}"
+                  ;;
+              esac
+            done
+          )
         else
 
           # Disable DPDK
