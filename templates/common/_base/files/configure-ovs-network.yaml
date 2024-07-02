@@ -972,6 +972,17 @@ contents:
         if [ ! -f /run/configure-ovs-boot-done ]; then
           echo "Running on boot, restoring previous configuration before proceeding..."
           rollback_nm
+
+          # Delete OVN integration bridge when its datapath type has to change
+          # TODO: Change OVN or OVN-Kubernetes to update the datapath type of the OVN integration bridge automatically
+          ovs_datapath_type=$(ovs-vsctl --timeout=30 --if-exists get bridge br-int datapath_type)
+          if { grep -w -q ovs-dpdk-vduse-poc /proc/cmdline && [ "$ovs_datapath_type" = "system" ]; } ||
+             { ! grep -w -q ovs-dpdk-vduse-poc /proc/cmdline && [ "$ovs_datapath_type" = "netdev" ]; }
+          then
+            echo "Deleting OVN integration bridge because its datapath type shall change"
+            ovs-vsctl --timeout=30 --if-exists del-br br-int
+          fi
+
           print_state
         fi
         touch /run/configure-ovs-boot-done
@@ -988,22 +999,6 @@ contents:
           if [ -f "$extra_bridge_file" ] || [ -z "$(nmcli connection show --active br-ex 2> /dev/null)" ]; then
             echo "Bridge br-ex is not active, restoring previous configuration before proceeding..."
             rollback_nm
-            print_state
-          fi
-        fi
-
-        # Delete bridges when their datapath type is supposed to change
-        if nmcli connection show br-ex &>/dev/null; then
-          ovs_datapath_type=$(nmcli --get-values ovs-bridge.datapath-type connection show br-ex)
-          if { grep -w -q ovs-dpdk-vduse-poc /proc/cmdline && [ "$ovs_datapath_type" != "netdev" ]; } ||
-             { ! grep -w -q ovs-dpdk-vduse-poc /proc/cmdline && [ "$ovs_datapath_type" = "netdev" ]; }
-          then
-            echo "Datapath change requested, deleting previous configuration before proceeding..."
-            rollback_nm
-
-            # TODO: Change OVN or OVN-Kubernetes to update the datapath type of the OVN integration bridge automatically
-            ovs-vsctl --timeout=30 --if-exists del-br br-int
-
             print_state
           fi
         fi
