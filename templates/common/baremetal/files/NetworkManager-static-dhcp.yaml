@@ -23,6 +23,13 @@ contents:
         exit 0
     fi
 
+    # TODO: Implement support, probably by simply removing the following bailout.
+    if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline
+    then
+        >&2 echo "VDUSE PoC is not supported. Ignoring."
+        exit 0
+    fi
+
     IPS=($IP4_ADDRESS_0)
     CIDR=${IPS[0]}
     GATEWAY=${IPS[1]}
