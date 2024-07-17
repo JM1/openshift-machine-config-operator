@@ -28,13 +28,6 @@ contents:
         exit 0
     fi
 
-    # TODO: Implement support, probably by simply removing the following bailout.
-    if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline
-    then
-        >&2 echo "VDUSE PoC is not supported. Ignoring."
-        exit 0
-    fi
-
     nmcli_args=()
 
     if [ "$CONNECTION_ID" != "inf-lease-to-static" ]
