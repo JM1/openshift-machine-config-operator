@@ -278,14 +278,24 @@ contents:
         # e.g. /sys/devices/pci0000:00/0000:00:02.0/0000:01:00.0/virtio1/net/enp1s0
         net_dev_path=$(readlink -f "$net_dev")
 
-        # e.g. 0000:01:00.0
-        pci_dev_name=$(echo "${net_dev}" | cut -d '/' -f 6)
+        # e.g. 0000:00:02.0 0000:01:00.0 virtio1
+        net_dev_parts="$(echo "${net_dev}" | cut -d '/' -f 5- | cut -d '/' -f -3 | tr '/' ' ')"
+
+        # iterate over $net_dev_parts in reverse order to find the proper $pci_dev_name such as 0000:01:00.0
+        pci_dev="${net_dev}/../.."
+        pci_dev_name=""
+        for net_dev_part in $(echo "${net_dev_parts}" | awk '{ for (i=NF; i>1; i--) printf("%s ",$i); print $1; }'); do
+            if [ -e "/sys/bus/pci/devices/${net_dev_part}" ]; then
+                # e.g. 0000:01:00.0
+                pci_dev_name="${net_dev_part}"
+                break
+            fi
+            # e.g. /sys/bus/pci/devices/0000:01:00.0/virtio1/net/enp1s0/../../..
+            pci_dev="${pci_dev}/.."
+        done
 
         # e.g. virtio-pci
         net_dev_drv=$(lspci -vmmks "${pci_dev_name}" | sed -n 's/^Driver:\s\(.*\)$/\1/p')
-
-        # e.g. /sys/bus/pci/devices/0000:01:00.0/virtio1/net/enp1s0/../../..
-        pci_dev="${net_dev}/../../.."
 
         # e.g. /sys/devices/pci0000:00/0000:00:02.0/0000:01:00.0
         pci_dev_path=$(readlink -f "${pci_dev}")
