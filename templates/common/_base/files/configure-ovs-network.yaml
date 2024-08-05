@@ -422,6 +422,7 @@ contents:
       fi
 
       if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline && [ -z "$dpdk_drv_name" ]; then
+        # TODO: Reenable the following features when switching back to OVS system datapath.
         extra_phys_args+=(ethtool.feature-gro off)
         extra_phys_args+=(ethtool.feature-gso off)
         extra_phys_args+=(ethtool.feature-tso off)
