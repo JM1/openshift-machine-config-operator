@@ -48,6 +48,20 @@ contents:
 
       if [ "$1" = "OVNKubernetes" ]; then
         if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline; then
+          # Load VFIO modules early otherwise ovs-vswitchd will not be able to use NICs with DPDK drivers.
+          #
+          # The following kernel arguments might be useful:
+          #
+          # * vfio.enable_unsafe_noiommu_mode=1
+          #   When attaching NICs with DPDK drivers to Open vSwitch when no IOMMU is available.
+          #
+          # * vfio_iommu_type1.allow_unsafe_interrupts=1
+          #   When attaching NICs with DPDK drivers to Open vSwitch when interrupt remapping is not
+          #   enabled (QEMU's Intel IOMMU) or not supported (QEMU's virtio IOMMU)
+          #
+          modprobe vfio-pci
+
+          # Enable VDUSE support
           modprobe vduse
           modprobe virtio-vdpa
 
