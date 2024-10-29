@@ -61,8 +61,9 @@ contents:
       ovs_interface="ovs-if-${bridge_name}"
       default_port_name="ovs-port-${port_name}" # ovs-port-phys0
       bridge_interface_name="ovs-if-${port_name}" # ovs-if-phys0
+      non_dpdk_interface_name="non-dpdk-${port_name}" # non-dpdk-phys0
       # In RHEL7 files in /{etc,run}/NetworkManager/system-connections end without the suffix '.nmconnection', whereas in RHCOS they end with the suffix.
-      MANAGED_NM_CONN_FILES=($(echo "${base_path}"/{"$bridge_name","$ovs_interface","$ovs_port","$bridge_interface_name","$default_port_name"}{,.nmconnection}))
+      MANAGED_NM_CONN_FILES=($(echo "${base_path}"/{"$bridge_name","$ovs_interface","$ovs_port","$bridge_interface_name","$non_dpdk_interface_name","$default_port_name"}{,.nmconnection}))
       shopt -s nullglob
       MANAGED_NM_CONN_FILES+=(${base_path}/*${MANAGED_NM_CONN_SUFFIX}.nmconnection ${base_path}/*${MANAGED_NM_CONN_SUFFIX})
       shopt -u nullglob
@@ -169,6 +170,7 @@ contents:
       local ovs_interface="ovs-if-${bridge_name}"
       local default_port_name="ovs-port-${port_name}" # ovs-port-phys0
       local bridge_interface_name="ovs-if-${port_name}" # ovs-if-phys0
+      local non_dpdk_interface_name="non-dpdk-${port_name}" # non-dpdk-phys0
 
       if [ "$iface" = "$bridge_name" ]; then
         # handle vlans and bonds etc if they have already been
@@ -206,30 +208,161 @@ contents:
       fi
 
       # store old conn for later
-      old_conn=$(nmcli --fields UUID,DEVICE conn show --active | awk "/\s${iface}\s*\$/ {print \$1}")
+      old_conn=$(nmcli --fields UUID,DEVICE conn show --active \
+                 | grep -v "$non_dpdk_interface_name" \
+                 | awk "/\s${iface}\s*\$/ {print \$1}")
 
       if [[ -z "$old_conn" ]]; then
         echo "ERROR: cannot find connection for interface: ${iface}"
         exit 1
       fi
 
+      old_conn_type=$(nmcli --get-values connection.type conn show "${old_conn}")
+
       # create bridge
       if ! nmcli connection show "$bridge_name" &> /dev/null; then
         ovs-vsctl --timeout=30 --if-exists del-br "$bridge_name"
+
+        ovs_datapath_type=system
         if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline; then
-          add_nm_conn "$bridge_name" type ovs-bridge conn.interface "$bridge_name" 802-3-ethernet.mtu ${iface_mtu} \
-          connection.autoconnect-slaves 1 ovs-bridge.datapath-type netdev
-        else
-          add_nm_conn "$bridge_name" type ovs-bridge conn.interface "$bridge_name" 802-3-ethernet.mtu ${iface_mtu} \
-          connection.autoconnect-slaves 1
+          ovs_datapath_type=netdev
         fi
+
+        add_nm_conn "$bridge_name" type ovs-bridge conn.interface "$bridge_name" 802-3-ethernet.mtu ${iface_mtu} \
+        connection.autoconnect-slaves 1 ovs-bridge.datapath-type "$ovs_datapath_type"
+      fi
+
+      # Attach NIC to OVS bridge using DPDK network driver
+      net_dev_name=""
+      dpdk_drv_name=""
+      if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline && [ "${old_conn_type}" = "802-3-ethernet" ]; then
+        # Only use DPDK network driver for NICs whose kernel device names have been specified at kernel cmdline.
+        #
+        # Valid kernel arguments:
+        #   ovs-dpdk-bind=enp1s0
+        #   ^ Attach a NIC with kernel device name enp1s0 to OVS using DPDK,
+        #     without unbinding the NIC from the kernel driver first.
+        #
+        #   ovs-dpdk-bind=enp1s0,vfio-pci
+        #   ^ Unbind a NIC with kernel device name enp1s0 from kernel driver first, then bind
+        #     it to DPDK-compatible kernel driver vfio-pci and assign it to OVS using DPDK.
+        ovs_dpdk_bind="$(
+          set -- $(cat /proc/cmdline)
+          for arg in "$@"; do
+            case "$arg" in
+              ovs-dpdk-bind=*)
+                net_dev_name=$(echo "${arg#ovs-dpdk-bind=}" | cut -d "," -f 1)
+                if [ "$net_dev_name" = "$iface" ]; then
+                  echo "${arg#ovs-dpdk-bind=}"
+                fi
+                ;;
+              esac
+            done
+        )"
+
+        # e.g. enp1s0
+        net_dev_name="$(echo "$ovs_dpdk_bind" | cut -d "," -f 1)"
+
+        # e.g. vfio-pci
+        dpdk_drv_name="$(echo "$ovs_dpdk_bind" | cut -s -d "," -f 2)"
+
+        if [ -n "$dpdk_drv_name" ]; then
+          echo "Binding NIC ${iface} to DPDK-compatible kernel module ${dpdk_drv_name}."
+        fi
+      fi
+
+      if [ -n "$net_dev_name" ]; then
+        # TODO: Drop unused variable.
+        # e.g. 52:54:00:aa:bb:cc
+        #net_dev_mac="$(cat "/sys/class/net/${net_dev_name}/address")"
+
+        # TODO: Drop unused variable.
+        # e.g. 1500
+        #net_dev_mtu="$(cat "/sys/class/net/${net_dev_name}/mtu")"
+
+        # e.g. /sys/bus/pci/devices/0000:01:00.0/virtio1/net/enp1s0
+        net_dev=$(find /sys/bus/pci/devices/*/*/net -name "${iface}")
+
+        [ -n "${net_dev}" ] || exit 1 # assert
+
+        # TODO: Drop unused variable.
+        # e.g. /sys/devices/pci0000:00/0000:00:02.0/0000:01:00.0/virtio1/net/enp1s0
+        #net_dev_path=$(readlink -f "$net_dev")
+
+        # e.g. 0000:00:02.0 0000:01:00.0 virtio1
+        net_dev_parts="$(echo "${net_dev}" | cut -d '/' -f 5- | cut -d '/' -f -3 | tr '/' ' ')"
+
+        # Search for PCI device name in /sys/bus/pci/devices when binding to DPDK-compatible driver. In particular,
+        # iterate over $net_dev_parts in reverse order to find the proper $pci_dev_name such as 0000:01:00.0
+        #
+        # The path to the PCI device name differs depending on the type of NIC being used. For example, with Intel NICs
+        # the 6th element, i.e. 000:31:00.0, in /sys/bus/pci/devices/0000:30:04.0/0000:31:00.0/net/eno12399 describes
+        # the PCI device name. For virtio NICs it is the 5th path element, i.e. 0000:01:00.0 in
+        # /sys/bus/pci/devices/0000:01:00.0/virtio1/net/enp1s0.
+        pci_dev="${net_dev}/../.."
+        pci_dev_name=""
+        for net_dev_part in $(echo "${net_dev_parts}" | awk '{ for (i=NF; i>1; i--) printf("%s ",$i); print $1; }'); do
+          if [ -e "/sys/bus/pci/devices/${net_dev_part}" ]; then
+            # e.g. 0000:01:00.0
+            pci_dev_name="${net_dev_part}"
+            break
+          fi
+          # e.g. /sys/bus/pci/devices/0000:01:00.0/virtio1/net/enp1s0/../../..
+          pci_dev="${pci_dev}/.."
+        done
+
+        # TODO: Drop unused variable.
+        # e.g. virtio-pci
+        #net_dev_drv=$(lspci -vmmks "${pci_dev_name}" | sed -n 's/^Driver:\s\(.*\)$/\1/p')
+
+        # TODO: Drop unused variable.
+        # e.g. /sys/devices/pci0000:00/0000:00:02.0/0000:01:00.0
+        #pci_dev_path=$(readlink -f "${pci_dev}")
+
+        if [ -n "$dpdk_drv_name" ]; then
+          # e.g. /sys/bus/pci/devices/0000:01:00.0/virtio1/net/enp1s0/../../../driver
+          pci_drv="${pci_dev}/driver"
+
+          # e.g. /sys/bus/pci/drivers/virtio-pci
+          pci_drv_path=$(readlink -f "${pci_drv}")
+
+          [ -n "${pci_drv_path}" ] || exit 1 # assert
+
+          # e.g. virtio-pci
+          pci_drv_name=$(basename "${pci_drv_path}")
+
+          # e.g. /sys/bus/pci/drivers/vfio-pci
+          dpdk_drv_path="/sys/bus/pci/drivers/${dpdk_drv_name}"
+
+          cat << ______EOF > "/run/${iface}.ovs-dpdk-binding"
+    #!/bin/bash
+    dpdk_drv_name="$dpdk_drv_name"
+    dpdk_drv_path="$dpdk_drv_path"
+    net_dev_name="$net_dev_name"
+    net_dev="$net_dev"
+    pci_dev_name="$pci_dev_name"
+    pci_dev="$pci_dev"
+    pci_drv="pci_drv"
+    pci_drv_path="$pci_drv_path"
+    pci_drv_name="$pci_drv_name"
+    ______EOF
+
+          # Binding to DPDK-compatible driver comes later because ${iface} is still accessed below
+        fi
+      fi
+
+      if [ -z "$net_dev_name" ]; then
+        default_iface=${iface}
+      else
+        default_iface=${port_name}
       fi
 
       # find default port to add to bridge
       if ! nmcli connection show "$default_port_name" &> /dev/null; then
         ovs-vsctl --timeout=30 --if-exists del-port "$bridge_name" ${iface}
-        add_nm_conn "$default_port_name" type ovs-port conn.interface ${iface} slave-type ovs-bridge master "$bridge_name" \
-        connection.autoconnect-slaves 1
+        ovs-vsctl --timeout=30 --if-exists del-port "$bridge_name" "$port_name"
+        add_nm_conn "$default_port_name" type ovs-port conn.interface "$default_iface" slave-type ovs-bridge \
+          master "$bridge_name" connection.autoconnect-slaves 1
       fi
 
       if ! nmcli connection show "$ovs_port" &> /dev/null; then
@@ -239,7 +372,7 @@ contents:
 
       extra_phys_args=()
       # check if this interface is a vlan, bond, team, or ethernet type
-      if [ "$(nmcli --get-values connection.type conn show ${old_conn})" == "vlan" ]; then
+      if [ "${old_conn_type}" = "vlan" ]; then
         iface_type=vlan
         vlan_id=$(nmcli --get-values vlan.id conn show ${old_conn})
         if [ -z "$vlan_id" ]; then
@@ -259,7 +392,7 @@ contents:
         fi
 
         extra_phys_args=( dev "${vlan_parent}" id "${vlan_id}" )
-      elif [ "$(nmcli --get-values connection.type conn show ${old_conn})" == "bond" ]; then
+      elif [ "${old_conn_type}" = "bond" ]; then
         iface_type=bond
         # check bond options
         bond_opts=$(nmcli --get-values bond.options conn show ${old_conn})
@@ -271,7 +404,7 @@ contents:
             clone_mac=0
           fi
         fi
-      elif [ "$(nmcli --get-values connection.type conn show ${old_conn})" == "team" ]; then
+      elif [ "${old_conn_type}" = "team" ]; then
         iface_type=team
         # check team config options
         team_config_opts=$(nmcli --get-values team.config -e no conn show ${old_conn})
@@ -285,12 +418,14 @@ contents:
             clone_mac=0
           fi
         fi
-      elif [ "$(nmcli --get-values connection.type conn show ${old_conn})" == "tun" ]; then
+      elif [ "${old_conn_type}" = "tun" ]; then
         iface_type=tun
         tun_mode=$(nmcli --get-values tun.mode -e no connection show ${old_conn})
         extra_phys_args+=( tun.mode "${tun_mode}" )
       elif [ "$(nmcli --get-values connection.type conn show ${old_conn})" == "bridge" ]; then
         iface_type=bridge
+      elif [ -n "$net_dev_name" ]; then
+        iface_type=ovs-interface
       else
         iface_type=802-3-ethernet
       fi
@@ -309,7 +444,7 @@ contents:
         extra_phys_args+=( 802-3-ethernet.cloned-mac-address "${iface_mac}" )
       fi
 
-      if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline; then
+      if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline && [ -z "$net_dev_name" ]; then
         # TODO: Reenable the following features when switching back to OVS system datapath.
         extra_phys_args+=(ethtool.feature-gro off)
         extra_phys_args+=(ethtool.feature-gso off)
@@ -319,11 +454,18 @@ contents:
 
       # use ${extra_phys_args[@]+"${extra_phys_args[@]}"} instead of ${extra_phys_args[@]} to be compatible with bash 4.2 in RHEL7.9
       if ! nmcli connection show "$bridge_interface_name" &> /dev/null; then
-        ovs-vsctl --timeout=30 --if-exists destroy interface ${iface}
         ovs_default_port_conn=$(nmcli -g connection.uuid conn show "$default_port_name")
-        add_nm_conn "$bridge_interface_name" type ${iface_type} conn.interface ${iface} master "$ovs_default_port_conn" \
-          slave-type ovs-port connection.autoconnect-priority 100 connection.autoconnect-slaves 1 802-3-ethernet.mtu ${iface_mtu} \
-          ${extra_phys_args[@]+"${extra_phys_args[@]}"}
+
+        if [ -n "$net_dev_name" ]; then
+            extra_phys_args+=(ovs-dpdk.devargs "${pci_dev_name}")
+        fi
+
+        ovs-vsctl --timeout=30 --if-exists destroy interface "${iface}"
+        ovs-vsctl --timeout=30 --if-exists destroy interface "${port_name}"
+        add_nm_conn "$bridge_interface_name" type ${iface_type} conn.interface ${default_iface} \
+          master "$ovs_default_port_conn" slave-type ovs-port \
+          connection.autoconnect-priority 100 connection.autoconnect-slaves 1 \
+          802-3-ethernet.mtu ${iface_mtu} ${extra_phys_args[@]+"${extra_phys_args[@]}"}
       fi
 
       # Get the new connection uuids
@@ -346,6 +488,8 @@ contents:
         echo "WARNING: MTU ${iface_mtu} is lower than the minimum required of 1280 for IPv6"
       fi
 
+      # TODO: Will performance improve when we change OVS interface br-ex* (OVS port br-ex*)
+      #       from type internal to type dpdkvhostuserclient, i.e. VDUSE, below?
       if ! nmcli connection show "$ovs_interface" &> /dev/null; then
         ovs-vsctl --timeout=30 --if-exists destroy interface "$bridge_name"
         # Clone the connection in case the method is manual or in case the an address is set (DHCP + static IP)
@@ -423,9 +567,28 @@ contents:
             ipv6.method "${ipv6_method}" ipv6.route-metric "${bridge_metric}" \
             ${extra_if_brex_args}
         fi
+
+        if [ -n "$net_dev_name" ] && [ -z "$dpdk_drv_name" ]; then
+          # Network interface will be attached to OVS bridge using DPDK but without unbinding the network device from
+          # the kernel driver first. The IP configuration of the old NM connection has been cloned or copied above to
+          # the new NM connection, so the IPs have to be removed from the kernel network device. To do so, a new NM
+          # connection without IPs is created for the kernel network device.
+          add_nm_conn "${non_dpdk_interface_name}" conn.interface "${iface}" type 802-3-ethernet \
+            ipv4.method disabled ipv6.method disabled
+        fi
       fi
 
-      configure_driver_options "${iface}"
+      if [ -z "$dpdk_drv_name" ]; then
+        configure_driver_options "${iface}"
+      else
+        echo "Unbinding ${iface} (PCI device ${pci_dev_name}) from kernel driver ${pci_drv_name} (${pci_drv_path})"
+        echo "${pci_dev_name}" > "${pci_drv_path}/unbind"
+
+        echo "Binding PCI device ${pci_dev_name} (previously kernel device ${iface}) to DPDK-compatible driver ${dpdk_drv_name}"
+        echo "${dpdk_drv_name}" > "/sys/bus/pci/devices/${pci_dev_name}/driver_override"
+        echo "${pci_dev_name}" > "${dpdk_drv_path}/bind"
+        echo -e "\0" > "/sys/bus/pci/devices/${pci_dev_name}/driver_override"
+      fi
     }
 
     # Used to remove a bridge
@@ -514,12 +677,77 @@ contents:
     rollback_nm() {
       phys0=$(get_bridge_physical_interface ovs-if-phys0)
       phys1=$(get_bridge_physical_interface ovs-if-phys1)
-      
+
+      refresh_phys=()
+
       # Revert changes made by /usr/local/bin/configure-ovs.sh during SDN migration.
       remove_all_ovn_bridges
-      
+
+      # Unbind NICs from DPDK-compatible drivers and bind NICs to kernel drivers
+      shopt -s nullglob
+      ovs_dpdk_bindings=(/run/*.ovs-dpdk-binding)
+      shopt -u nullglob
+
+      if [ ${#ovs_dpdk_bindings[@]} -gt 0 ]; then
+        case ${#ovs_dpdk_bindings[@]} in
+          1)
+            if [ -n "$phys0" ] && [ -n "$phys1" ]; then
+              echo "WARNING: Found one DPDK NIC binding configuration (${ovs_dpdk_bindings[0]}),"
+              echo "WARNING: but also found two NICs with kernel drivers (phys0=$phys0, phys1=$phys1)."
+            fi
+            ;;
+          2)
+            if [ -n "$phys0" ] || [ -n "$phys1" ]; then
+              echo "WARNING: Found two DPDK NIC binding configurations (${ovs_dpdk_bindings[*]}),"
+              echo "WARNING: but also found NICs with kernel drivers (phys0=$phys0, phys1=$phys1)."
+            fi
+
+            ;;
+          *)
+            echo "WARNING: Found more than two DPDK NIC binding configurations (${ovs_dpdk_bindings[*]})"
+            ;;
+        esac
+
+        for ovs_dpdk_binding in "${ovs_dpdk_bindings[@]}"; do
+          source "$ovs_dpdk_binding"
+
+          echo "Unbinding PCI device ${pci_dev_name} (previously kernel device ${net_dev_name}) from DPDK-compatible driver ${dpdk_drv_name} (${dpdk_drv_path})"
+          echo "${pci_dev_name}" > "${dpdk_drv_path}/unbind"
+
+          echo "Binding PCI device ${pci_dev_name} (previously kernel device ${net_dev_name}) to kernel driver ${pci_drv_name} (${pci_drv_path})"
+          echo "${pci_drv_name}" > "/sys/bus/pci/devices/${pci_dev_name}/driver_override"
+          echo "${pci_dev_name}" > "${pci_drv_path}/bind"
+          echo -e "\0" > "/sys/bus/pci/devices/${pci_dev_name}/driver_override"
+
+          shopt -s nullglob
+          new_net_devs=("/sys/bus/pci/devices/${pci_dev_name}/"*/net/*)
+          shopt -u nullglob
+
+          if [ ${#new_net_devs[@]} -eq 0 ]; then
+            echo "WARNING: No kernel devices found for PCI device ${pci_dev_name} (previously kernel device ${net_dev_name}),"
+            echo "WARNING: after binding it to kernel driver ${pci_drv_name}"
+            continue
+          elif [ ${#new_net_devs[@]} -gt 1 ]; then
+            echo "WARNING: Multiple kernel devices found for PCI device ${pci_dev_name} (previously kernel device ${net_dev_name}),"
+            echo "WARNING: after binding it to kernel driver ${pci_drv_name}: ${new_net_devs[*]}"
+          fi
+          new_net_dev=${new_net_devs[0]}
+          new_net_dev_name=$(basename "$new_net_dev")
+          if [ "$net_dev" != "$new_net_dev" ]; then
+            echo "WARNING: PCI device ${pci_dev_name} got new device name $new_net_dev_name (previously $net_dev_name)"
+            echo "WARNING: after binding it to kernel driver ${pci_drv_name}"
+          fi
+          refresh_phys+=("$new_net_dev_name")
+        done
+
+        rm -f "${ovs_dpdk_bindings[@]}"
+      fi
+
       # reload profiles so that NM notices that some were removed
-      reload_profiles_nm "$phys0" "$phys1"
+      #
+      # order is irrelevant because phys0 and phys1 will be used only
+      # to activate and wait for NM connections.
+      reload_profiles_nm "$phys0" "$phys1" "${refresh_phys[@]}"
     }
 
     # Add a temporary deactivated connection profile 
@@ -1082,9 +1310,11 @@ contents:
           connections+=(br-ex1 ovs-if-phys1)
         fi
         while IFS= read -r connection; do
-          if [[ $connection == *"$MANAGED_NM_CONN_SUFFIX" ]]; then
-            connections+=("$connection")
-          fi
+          case "$connection" in
+            *"$MANAGED_NM_CONN_SUFFIX"|non-dpdk-phys0|non-dpdk-phys1)
+                connections+=("$connection")
+                ;;
+          esac
         done < <(nmcli -g NAME c)
         connections+=(ovs-if-br-ex)
         if [ -f "$extra_bridge_file" ]; then
