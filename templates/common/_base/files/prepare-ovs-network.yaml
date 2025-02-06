@@ -86,12 +86,36 @@ contents:
               esac
             done
           )
-        else
 
+          # Run OVS as root user to allow OVS to manage VDUSE devices
+          # TODO: Replace with proper solution to allow OVS to manage VDUSE devices.
+          ovs_user=$(. /etc/sysconfig/openvswitch && echo "${OVS_USER_ID:-root:root}" | cut -d ":" -f 1)
+          if [ "$ovs_user" != "root" ]; then
+            cp -av "/etc/sysconfig/openvswitch" "/etc/sysconfig/openvswitch.bak.ovs-dpdk-vduse-poc"
+            sed -i -e 's/^OVS_USER_ID=/# OVS_USER_ID=/g' /etc/sysconfig/openvswitch
+            echo 'OVS_USER_ID="root:root"' >> /etc/sysconfig/openvswitch
+
+            # Reboot to apply changes because systemd will not (re)load environment variable OVS_USER_ID when
+            # running "systemctl daemon-reload" and "systemctl restart --no-block ovs-vswitchd.service".
+            systemctl reboot
+            exit 255
+          fi
+        else
           # Disable DPDK
           ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-init=false
           ovs-vsctl --no-wait set Open_vSwitch . other_config:userspace-tso-enable=false
           ovs-vsctl --no-wait --if-exists remove open . external-ids ovn-bridge-datapath-type="netdev"
+
+          # Restore previous OVS configuration to revoke privilege to manage VDUSE devices from OVS
+          # TODO: Replace with proper solution to allow OVS to manage VDUSE devices.
+          if [ -e "/etc/sysconfig/openvswitch.bak.ovs-dpdk-vduse-poc" ]; then
+            mv -v "/etc/sysconfig/openvswitch.bak.ovs-dpdk-vduse-poc" "/etc/sysconfig/openvswitch"
+
+            # Reboot to apply changes because systemd will not (re)load environment variable OVS_USER_ID when
+            # running "systemctl daemon-reload" and "systemctl restart --no-block ovs-vswitchd.service".
+            systemctl reboot
+            exit 255
+          fi
         fi
       fi
     }
