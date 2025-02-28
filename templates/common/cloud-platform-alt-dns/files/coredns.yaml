@@ -40,7 +40,10 @@ contents:
         - "/config"
         - "--out-dir"
         - "/etc/coredns"
-        resources: {}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 200Mi
         volumeMounts:
         - name: kubeconfig
           mountPath: "/var/lib/kubelet"
