@@ -47,7 +47,10 @@ contents:
         - "/etc/coredns"
         - "--resolvconf-path"
         - "/var/run/NetworkManager/resolv.conf"
-        resources: {}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 200Mi
         terminationMessagePolicy: FallbackToLogsOnError
         volumeMounts:
         - name: kubeconfig
