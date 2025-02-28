@@ -40,7 +40,10 @@ contents:
           while ! /usr/bin/curl -o /dev/null -kLfs https://api-int.{{ .DNS.Spec.BaseDomain }}:6443/healthz; do
             sleep 5
           done
-        resources: {}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 200Mi
         terminationMessagePolicy: FallbackToLogsOnError
         volumeMounts:
         - name: chroot-host
