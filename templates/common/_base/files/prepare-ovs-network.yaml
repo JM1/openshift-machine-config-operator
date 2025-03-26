@@ -103,6 +103,28 @@ contents:
             systemctl reboot
             exit 255
           fi
+
+          if grep -w -q ovs-dpdk-dbg /proc/cmdline; then
+            ovs-vsctl --no-wait set open . \
+              other_config:dpdk-extra='-a 0000:00:00.0 --log-level=pmd.net.virtio.*:debug --log-level=lib.eal:debug'
+
+            ovs_options=$(. /etc/sysconfig/openvswitch && echo "${OPTIONS:-}" | cut -d ":" -f 1)
+            if [ -n "$ovs_options" ]; then
+              echo "WARNING: OPTIONS has already been defined in /etc/sysconfig/openvswitch"
+            else
+              if [ ! -e "/etc/sysconfig/openvswitch.bak.ovs-dpdk-vduse-poc" ]; then
+                cp -av "/etc/sysconfig/openvswitch" "/etc/sysconfig/openvswitch.bak.ovs-dpdk-vduse-poc"
+              fi
+
+              sed -i -e 's/^OPTIONS=/# OPTIONS=/g' /etc/sysconfig/openvswitch
+              echo 'OPTIONS="--ovs-vswitchd-options='\''-vfile:dpdk:dbg'\''"' >> /etc/sysconfig/openvswitch
+
+              # Reboot to apply changes because systemd will not (re)load environment variable OPTIONS when
+              # running "systemctl daemon-reload" and # "systemctl restart --no-block ovs-vswitchd.service".
+              systemctl reboot
+              exit 255
+            fi
+          fi
         else
           # Disable DPDK
           ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-init=false
@@ -110,7 +132,8 @@ contents:
           ovs-vsctl --no-wait --if-exists remove open . external-ids ovn-bridge-datapath-type="netdev"
           ovs-vsctl --no-wait --if-exists remove open . other_config dpdk-extra
 
-          # Restore previous OVS configuration to revoke privilege to manage VDUSE devices from OVS
+          # Restore previous OVS configuration, e.g. revoke privilege for
+          # managing VDUSE devices from OVS and disable debug output
           # TODO: Replace with proper solution to allow OVS to manage VDUSE devices.
           if [ -e "/etc/sysconfig/openvswitch.bak.ovs-dpdk-vduse-poc" ]; then
             mv -v "/etc/sysconfig/openvswitch.bak.ovs-dpdk-vduse-poc" "/etc/sysconfig/openvswitch"
