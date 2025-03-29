@@ -65,7 +65,13 @@ contents:
         plus='+'
     done
 
-    nmcli con up "$STATIC_INT_NAME"
+    for i in {1..10}; do
+        nmcli con up "$STATIC_INT_NAME" && s=0 && break || s=$?
+        sleep 5
+    done
+    if [ "$s" -ne "0" ]; then
+        exit "$s"
+    fi
 
     if [ -n "${DHCP4_HOST_NAME:-}" ]
     then
