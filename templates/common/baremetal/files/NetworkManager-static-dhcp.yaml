@@ -65,7 +65,7 @@ contents:
         plus='+'
     done
 
-    nmcli --wait 600 con up "$STATIC_INT_NAME"
+    nmcli con up "$STATIC_INT_NAME"
 
     if [ -n "${DHCP4_HOST_NAME:-}" ]
     then

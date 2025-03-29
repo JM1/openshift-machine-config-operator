@@ -840,7 +840,7 @@ contents:
         # Activate all interfaces that are not yet active
         for i in {1..10}; do
           echo "Attempt $i to bring up connection $conn"
-          nmcli --wait 600 conn up "$conn" && s=0 && break || s=$?
+          nmcli conn up "$conn" && s=0 && break || s=$?
           sleep 5
         done
         if [ $s -eq 0 ]; then
