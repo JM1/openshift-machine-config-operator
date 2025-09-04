@@ -444,14 +444,6 @@ contents:
         extra_phys_args+=( 802-3-ethernet.cloned-mac-address "${iface_mac}" )
       fi
 
-      if grep -w -q ovs-dpdk-vduse-poc /proc/cmdline && [ -z "$net_dev_name" ]; then
-        # TODO: Reenable the following features when switching back to OVS system datapath.
-        extra_phys_args+=(ethtool.feature-gro off)
-        extra_phys_args+=(ethtool.feature-gso off)
-        extra_phys_args+=(ethtool.feature-tso off)
-        extra_phys_args+=(ethtool.feature-tx off)
-      fi
-
       # use ${extra_phys_args[@]+"${extra_phys_args[@]}"} instead of ${extra_phys_args[@]} to be compatible with bash 4.2 in RHEL7.9
       if ! nmcli connection show "$bridge_interface_name" &> /dev/null; then
         ovs_default_port_conn=$(nmcli -g connection.uuid conn show "$default_port_name")
